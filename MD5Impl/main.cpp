@@ -5,6 +5,10 @@
 #include <sstream>
 #include <iomanip>
 #include <codecvt>
+#include <locale>
+#include <fstream>
+#include <io.h>
+#include <fcntl.h>
 
 // 448 bits
 #define PADDING_SIZE 56 
@@ -70,13 +74,34 @@ std::string BytesToHexString(const std::vector<uint8_t>& bytes) {
 	return stream.str();
 }
 
+bool ReadFile(const std::string& filename, std::wstring& outMessage)
+{
+	std::wifstream inputFile(filename);
+
+	if (!inputFile.is_open())
+		return false;
+
+	wchar_t line[255] = { 0 };
+	while (inputFile.good())
+	{
+		inputFile.getline(line, 255);
+		outMessage.append(line);
+		memset(line, 0, 255 * sizeof(wchar_t));
+
+		if (inputFile.fail())
+			break;
+	}
+
+	return true;
+}
+
 int main(int argc, char** argv)
 {
-	std::wstring message = L"abc";
-
+	_setmode(_fileno(stdin), _O_U16TEXT);
+	std::wstring message;
 
 	std::wcout << "Enter a message: " << std::endl;
-	std::wcin >> message;
+	std::getline(std::wcin, message);
 
 	// Convert the input into bytes
 	std::vector<uint8_t> bytes = ConvertWideStringToBytes(message);
