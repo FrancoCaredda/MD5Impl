@@ -1,3 +1,5 @@
+#define _CRT_SECURE_NO_WARNINGS
+
 #include <iostream>
 #include <string>
 #include <vector>
@@ -9,6 +11,7 @@
 #include <fstream>
 #include <io.h>
 #include <fcntl.h>
+#include <unordered_map>
 
 // 448 bits
 #define PADDING_SIZE 56 
@@ -19,11 +22,21 @@
 
 #define OPERATIONS 64
 
+#define DEFAULT_MESSAGE_SIZE 255
+
 // Round functions
 #define F(B, C, D) (( (B) & (C) ) | ( (~(B)) & (D) ))
 #define H(B, C, D) (( (D) & (B) ) | ( (~(D)) & (C) ))
 #define J(B, C, D) ((B) ^ (C) ^ (D))
 #define I(B, C, D) ((C) ^ ( (B) | (~(D)) ))
+
+enum UserInput
+{
+	EXIT = 0,
+	ENTER_STRING = 1,
+	ENTER_FILE = 2,
+	CHECK_VALIDITY = 3
+};
 
 uint32_t LeftRotate(uint32_t x, uint32_t shift)
 {
@@ -58,15 +71,17 @@ static uint32_t K[CHUNK_SIZE] = {
 	0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391
 };
 
-std::vector<uint8_t> ConvertWideStringToBytes(const std::wstring& wideStr) {
-	std::wstring_convert<std::codecvt_utf8<wchar_t>> converter;
+std::vector<uint8_t> ConvertWideStringToBytes(const std::wstring& wideStr) 
+{
+	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
 	std::string utf8Str = converter.to_bytes(wideStr);
 
 	std::vector<uint8_t> bytes(utf8Str.begin(), utf8Str.end());
 	return bytes;
 }
 
-std::string BytesToHexString(const std::vector<uint8_t>& bytes) {
+std::string BytesToHexString(const std::vector<uint8_t>& bytes) 
+{
 	std::stringstream stream;
 	for (uint8_t byte : bytes) 
 		stream << std::setfill('0') << std::setw(2) << std::hex << static_cast<int>(byte);
@@ -74,38 +89,74 @@ std::string BytesToHexString(const std::vector<uint8_t>& bytes) {
 	return stream.str();
 }
 
-bool ReadFile(const std::string& filename, std::wstring& outMessage)
+bool ReadFileUTF8(const std::wstring& filename, std::wstring& outMessage, size_t& outSize)
 {
-	std::wifstream inputFile(filename);
+	FILE* file = _wfopen(filename.c_str(), L"r");
 
-	if (!inputFile.is_open())
+	if (!file)
 		return false;
 
+	_setmode(_fileno(file), _O_U8TEXT);
+
+	fseek(file, 0, SEEK_END);
+	outSize = ftell(file);
+
+	fseek(file, 0, SEEK_SET);
+
 	wchar_t line[255] = { 0 };
-	while (inputFile.good())
+	while (fgetws(line, 255, file) != nullptr)
 	{
-		inputFile.getline(line, 255);
 		outMessage.append(line);
 		memset(line, 0, 255 * sizeof(wchar_t));
 
-		if (inputFile.fail())
+		if (feof(file))
 			break;
+	}
+
+	fclose(file);
+
+	return true;
+}
+
+std::wstring RemoveInvisibleCharachter(const std::wstring& str)
+{
+	std::wstring result;
+	result.resize(str.size() - 1);
+
+	memcpy(const_cast<wchar_t*>(result.data()), str.data() + 1, (str.size() - 1) * sizeof(wchar_t));
+
+	return result;
+}
+bool ReadCache(const std::wstring& filename, std::unordered_map<std::wstring, std::wstring>& outCache)
+{
+	std::wstring data;
+	size_t size;
+	if (ReadFileUTF8(filename, data, size))
+	{
+		std::wstringstream stream(data);
+		std::wstring line;
+
+		while (stream.good())
+		{
+			stream >> line;
+			int delimIndex = line.find_first_of(':', 0);
+
+			if (delimIndex == std::string::npos)
+				break;
+
+			outCache[line.substr(0, delimIndex)] = line.substr(delimIndex + 1, line.size() - delimIndex);
+		}
+	}
+	else
+	{
+		return false;
 	}
 
 	return true;
 }
 
-int main(int argc, char** argv)
+std::string HashMD5(const std::vector<uint8_t>& bytes, size_t size)
 {
-	_setmode(_fileno(stdin), _O_U16TEXT);
-	std::wstring message;
-
-	std::wcout << "Enter a message: " << std::endl;
-	std::getline(std::wcin, message);
-
-	// Convert the input into bytes
-	std::vector<uint8_t> bytes = ConvertWideStringToBytes(message);
-
 	// Adding the padding
 	// 1. Add additional byte to save 0x80 (10000000)
 	int paddingLength = (PADDING_SIZE - ((bytes.size() + 1) % CHUNK_SIZE)) % CHUNK_SIZE;
@@ -116,7 +167,7 @@ int main(int argc, char** argv)
 	// 4. Insert 0x80
 	paddedBytes[bytes.size()] = 0x80;
 	// 5. Insert length in bits
-	uint64_t length = bytes.size() * 8;
+	uint64_t length = size * 8;
 	// Using pointer arethmerics to copy the length bytes into array fastly
 	memcpy(paddedBytes.data() + paddedBytes.size() - LENGTH_SIZE, &length, sizeof(uint64_t));
 
@@ -132,7 +183,7 @@ int main(int argc, char** argv)
 	{
 		// Copy the chunk
 		std::array<uint32_t, 16> M;
-		
+
 		memcpy(M.data(), paddedBytes.data() + (i * M.size() * sizeof(uint32_t)), (M.size() * sizeof(uint32_t)));
 
 		// Initialize the chunk hash
@@ -178,9 +229,9 @@ int main(int argc, char** argv)
 
 	// 3. Split the buffer in individual byte
 	std::vector<uint8_t> resultBytes = {
-		static_cast<uint8_t>(A), static_cast<uint8_t>( A >> 8 ),
-		static_cast<uint8_t>( A >> 16 ), static_cast<uint8_t>( A >> 24 ),
-		
+		static_cast<uint8_t>(A), static_cast<uint8_t>(A >> 8),
+		static_cast<uint8_t>(A >> 16), static_cast<uint8_t>(A >> 24),
+
 		static_cast<uint8_t>(B), static_cast<uint8_t>(B >> 8),
 		static_cast<uint8_t>(B >> 16), static_cast<uint8_t>(B >> 24),
 
@@ -191,7 +242,141 @@ int main(int argc, char** argv)
 		static_cast<uint8_t>(D >> 16), static_cast<uint8_t>(D >> 24),
 	};
 
-	std::cout << BytesToHexString(resultBytes) << std::endl;
+	return BytesToHexString(resultBytes);
+}
+
+int main(int argc, char** argv)
+{
+	_setmode(_fileno(stdin), _O_U16TEXT);
+	
+	std::unordered_map<std::wstring, std::wstring> cache;
+	ReadCache(L"cache.txt", cache);
+
+	wchar_t filename[DEFAULT_MESSAGE_SIZE] = { 0 };
+	wchar_t buffer[DEFAULT_MESSAGE_SIZE] = { 0 };
+
+	std::string message;
+	message.reserve(DEFAULT_MESSAGE_SIZE);
+	
+	FILE* outputFileStream = _wfopen(L"output.txt", L"a+");
+
+	if (outputFileStream == nullptr)
+	{
+		std::cout << "Error: can't open output file" << std::endl;
+		return -1;
+	}
+
+	_setmode(_fileno(outputFileStream), _O_U8TEXT);
+
+	int choice = -1;
+
+	do
+	{
+		if (choice == UserInput::ENTER_STRING)
+		{
+			std::wcin.ignore(1, '\n');
+			std::wcin.getline(buffer, DEFAULT_MESSAGE_SIZE);
+
+			auto bytes = ConvertWideStringToBytes(buffer);
+
+			std::string result = HashMD5(bytes, bytes.size());
+			std::wstring hash = std::wstring(result.begin(), result.end());
+
+			std::wcout << L"Result: " << hash << std::endl;
+
+			std::wstring response = std::wstring(L"H(") + buffer + L") = " + hash + L"\n";
+			fputws(response.c_str(), outputFileStream);
+
+			memset(buffer, 0, DEFAULT_MESSAGE_SIZE);
+
+			system("pause");
+		}
+		else if (choice == UserInput::ENTER_FILE)
+		{
+			std::wcin >> filename;
+			
+			std::wstring message;
+			size_t size;
+			if (ReadFileUTF8(filename, message, size))
+			{
+				auto bytes = ConvertWideStringToBytes(message);
+
+				std::string result = HashMD5(bytes, size);
+				std::wstring hash = std::wstring(result.begin(), result.end());
+				std::cout << "Result: " << result << std::endl;
+
+				std::wstring response = std::wstring(L"H(") + filename + L") = " + hash + L"\n";
+				fputws(response.c_str(), outputFileStream);
+
+				cache[filename] = hash;
+			}
+			else
+			{
+				std::wcout << "The file " << filename << " can't be read" << std::endl;
+			}
+
+			memset(filename, 0, DEFAULT_MESSAGE_SIZE);
+			system("pause");
+		}
+		else if (choice == UserInput::CHECK_VALIDITY)
+		{
+			std::wcin >> filename;
+			std::wstring message;
+			size_t size;
+			if (ReadFileUTF8(filename, message, size))
+			{
+				auto bytes = ConvertWideStringToBytes(message);
+				std::string result = HashMD5(bytes, size);
+				std::wstring hash = std::wstring(result.begin(), result.end());
+
+				if (cache.find(filename) != cache.end())
+				{
+					std::wstring savedMessage = cache[filename];
+					std::cout << "Is file corrupted? " << std::boolalpha << (savedMessage != hash) << std::endl;
+
+					std::wstring response = std::wstring(L"Is file corrupted? ") + ((savedMessage != hash) ? L"true" : L"false");
+
+					fputws(response.c_str(), outputFileStream);
+				}
+				else
+				{
+					std::cout << "The file wasn't in the cache. Its hash: " << result << std::endl;
+					std::wstring response = std::wstring(L"The file wasn't in the cache. Its hash: ") + hash;
+
+					fputws(response.c_str(), outputFileStream);
+
+					cache[filename] = hash;
+				}
+			}
+			else
+			{
+				std::cout << "The file " << filename << " can't be read" << std::endl;
+			}
+
+			memset(filename, 0, DEFAULT_MESSAGE_SIZE);
+			system("pause");
+		}
+
+		system("cls");
+		std::wcout << "Select command: 0 (exit), 1 (enter a message), 2 (enter a file), 3 (check validity): ";
+		std::wcin >> choice;
+		//message.clear();
+	} while (choice != UserInput::EXIT);
+
+	fclose(outputFileStream);
+
+	// Write cache
+	FILE* outputCache = _wfopen(L"cache.txt", L"w+");
+	_setmode(_fileno(outputCache), _O_U8TEXT);
+
+	for (auto it = cache.cbegin(); it != cache.cend(); it++)
+	{
+		std::wstring outResult = it->first + L":" + it->second + L"\n";
+		fputws(outResult.c_str(), outputCache);
+	}
+
+	fclose(outputCache);
+
 
 	return 0;
 }
